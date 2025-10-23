@@ -4,6 +4,16 @@ from io import BytesIO
 from datetime import datetime
 from playwright.async_api import async_playwright
 import streamlit as st
+import subprocess
+
+# ============================================================
+# ⚙️ GARANTE QUE O CHROMIUM ESTÁ INSTALADO (STREAMLIT CLOUD SAFE)
+# ============================================================
+try:
+    subprocess.run(["playwright", "install", "chromium"], check=True)
+except Exception as e:
+    st.warning("⚠️ Verificando navegador... pode levar alguns segundos.")
+    subprocess.run(["playwright", "install", "chromium", "--with-deps"], check=False)
 
 # ============================================================
 # 🧪 CONFIGURAÇÃO DA PÁGINA
@@ -63,7 +73,6 @@ async def coletar_dados(servsol, usuario, senha, paginas, status_cb, progress):
             progress.progress(i / paginas, text=f"Coletando página {i}...")
             status_cb.write(f"📄 Coletando dados da página {i}...")
 
-            # Extrair dados da página
             codigos = await page.query_selector_all(
                 '//div[@class="container-wb-lista-historico-preco"]//div[contains(@style, "width: 20%;")]/span[@class="exps-txts-headers"]'
             )
