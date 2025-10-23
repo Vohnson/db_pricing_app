@@ -1,6 +1,6 @@
 streamlit==1.38.0
+playwright==1.48.0
 pandas==2.2.2
 openpyxl==3.1.5
-playwright==1.48.0
 # 👇 Instala o Chromium interno automaticamente no ambiente do Streamlit Cloud
 playwright install chromium
