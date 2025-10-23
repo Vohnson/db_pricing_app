@@ -1,260 +1,142 @@
-import os
-import time
+import asyncio
+import pandas as pd
 from io import BytesIO
 from datetime import datetime
-
-import pandas as pd
+from playwright.async_api import async_playwright
 import streamlit as st
 
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
+# ============================================================
+# 🧪 CONFIGURAÇÃO DA PÁGINA
+# ============================================================
+st.set_page_config(page_title="DB-Pricing", page_icon="🧪", layout="wide")
 
-# ---------------------------
-# UI (Streamlit) – aparência e layout
-# ---------------------------
-st.set_page_config(
-    page_title="DB-Pricing",
-    page_icon="🧪",
-    layout="wide"
-)
+st.title("🧪 DB-Pricing")
+st.subheader("Coletor automático de preços do Diagnósticos do Brasil 💼")
 
 with st.sidebar:
-    st.markdown("### 🧪 DB-Pricing")
-    st.caption("Coleta de preços – Diagnósticos do Brasil")
-    st.markdown("---")
-    st.markdown("**Dica:** use o código do convênio (ServSol) que aparece no final da URL, ex.: `c14296`.")
+    st.markdown("### ⚙️ Configurações")
+    st.markdown("Insira abaixo os dados do convênio e login.")
+    st.divider()
+    st.caption("💡 *Use o código ServSol igual ao final da URL (ex.: c14296).*")
 
-st.title("DB-Pricing")
-st.subheader("Coletor de preços do Diagnósticos do Brasil")
+# ============================================================
+# FORMULÁRIO DE LOGIN
+# ============================================================
+with st.form("dados_db"):
+    servsol = st.text_input("🔑 Código do Convênio (ServSol)", "c14296")
+    usuario = st.text_input("👤 Usuário (CPF)", "")
+    senha = st.text_input("🔒 Senha", type="password")
+    paginas = st.number_input("📄 Páginas a coletar", 1, 300, 50)
+    enviar = st.form_submit_button("🚀 Iniciar Coleta", use_container_width=True)
 
-# ---------------------------
-# Formulário de entrada
-# ---------------------------
-with st.form("form_inputs", clear_on_submit=False):
-    col1, col2 = st.columns([1,1])
-    with col1:
-        servsol = st.text_input("Código do Convênio (ServSol)", placeholder="ex.: c14296").strip()
-        usuario = st.text_input("Usuário (CPF)", placeholder="00000000000").strip()
-    with col2:
-        senha = st.text_input("Senha", type="password")
-        total_paginas = st.number_input("Limite de páginas para coletar", 1, 500, value=50, step=1)
+# ============================================================
+# FUNÇÃO PRINCIPAL (ASYNC)
+# ============================================================
 
-    submitted = st.form_submit_button("🔎 Coletar e gerar Excel", use_container_width=True)
+async def coletar_dados(servsol, usuario, senha, paginas, status_cb, progress):
+    url_login = f"https://out-prd.diagnosticosdobrasil.com.br/Portal/Login?ServSol={servsol}"
+    dados_total = []
 
-# ---------------------------
-# Funções auxiliares Selenium
-# ---------------------------
-def build_driver():
-    """
-    Cria um Chrome headless usando o Chromium do ambiente do Streamlit Cloud.
-    Não depende do SO do usuário final.
-    """
-    chrome_options = webdriver.ChromeOptions()
-    # Binário e driver do apt (Streamlit Cloud)
-    chrome_bin = "/usr/bin/chromium"
-    driver_bin = "/usr/bin/chromedriver"
-    if os.path.exists(chrome_bin):
-        chrome_options.binary_location = chrome_bin
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        status_cb.write("🌎 Acessando portal...")
+        await page.goto(url_login, timeout=60000)
 
-    # flags necessárias no ambiente cloud
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-notifications")
-    chrome_options.add_argument("--disable-infobars")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("--lang=pt-BR")
+        # Login
+        status_cb.write("🔐 Fazendo login...")
+        await page.fill("#Input_UsernameVal", usuario)
+        await page.fill("#Input_PasswordVal", senha)
+        await page.click("button.btn-login")
+        await page.wait_for_timeout(3000)
 
-    service = Service(driver_bin) if os.path.exists(driver_bin) else Service()
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.set_page_load_timeout(60)
-    return driver
+        # Acessar menu financeiro
+        status_cb.write("📂 Acessando menu financeiro...")
+        await page.goto("https://out-prd.diagnosticosdobrasil.com.br/Portal/Financeiro?chave=")
+        await page.wait_for_timeout(4000)
+        await page.click(".fin-sidemenu-item")
+        await page.wait_for_timeout(2000)
+        await page.click("button.btn-wb-hp-filtrar")
+        await page.wait_for_timeout(5000)
 
-def wait_gone(driver, locator, timeout=15):
-    try:
-        WebDriverWait(driver, timeout).until(EC.invisibility_of_element_located(locator))
-    except Exception:
-        pass
+        for i in range(1, paginas + 1):
+            progress.progress(i / paginas, text=f"Coletando página {i}...")
+            status_cb.write(f"📄 Coletando dados da página {i}...")
 
-def try_click_next(driver, timeout=10):
-    """
-    Clica no botão 'next' da paginação.
-    Retorna True se conseguiu clicar, False caso contrário.
-    """
-    try:
-        btn = WebDriverWait(driver, timeout).until(
-            EC.element_to_be_clickable((By.XPATH, '//button[@aria-label="go to next page"]'))
-        )
-        btn.click()
-        # pequena espera para render
-        time.sleep(1.5)
-        return True
-    except Exception:
-        return False
+            # Extrair dados da página
+            codigos = await page.query_selector_all(
+                '//div[@class="container-wb-lista-historico-preco"]//div[contains(@style, "width: 20%;")]/span[@class="exps-txts-headers"]'
+            )
+            nomes = await page.query_selector_all(
+                '//div[@class="container-wb-lista-historico-preco"]//div[contains(@style, "width: 45%;")]/span'
+            )
+            valores = await page.query_selector_all(
+                '//div[@class="container-wb-lista-historico-preco"]//div[contains(@style, "width: 20%; text-align: center;")]/span[@class="exps-txts-headers"]'
+            )
 
-def coletar_pagina(driver):
-    """
-    Lê todos os cards da página atual e retorna lista de dicts.
-    Usa os mesmos seletores do seu robô original.
-    """
-    dados = []
+            lista = []
+            data_execucao = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    # Cada linha de resultado
-    cards = driver.find_elements(By.XPATH, '//div[contains(@class,"container-wb-lista-historico-preco")]')
-    if not cards:
-        return dados
+            for idx in range(min(len(codigos), len(nomes), len(valores))):
+                codigo = (await codigos[idx].inner_text()).strip()
+                nome = (await nomes[idx].inner_text()).strip()
+                valor = (await valores[idx].inner_text()).strip()
+                lista.append([codigo, nome, valor, data_execucao])
 
-    # Em cada card existem 3 spans alvo:
-    # - Código (20% | exps-txts-headers)
-    # - Descrição (45% | span texto)
-    # - Valor (20% | exps-txts-headers)
-    codigos = driver.find_elements(By.XPATH, '//div[@class="container-wb-lista-historico-preco"]//div[contains(@style,"width: 20%;")]/span[@class="exps-txts-headers"]')
-    nomes   = driver.find_elements(By.XPATH, '//div[@class="container-wb-lista-historico-preco"]//div[contains(@style,"width: 45%;")]/span')
-    valores = driver.find_elements(By.XPATH, '//div[@class="container-wb-lista-historico-preco"]//div[contains(@style,"width: 20%;") and contains(@style,"text-align: center")]/span[@class="exps-txts-headers"]')
-
-    n = min(len(codigos), len(nomes), len(valores))
-    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
-
-    for i in range(n):
-        codigo = codigos[i].text.strip()
-        nome   = nomes[i].text.strip()
-        valor  = valores[i].text.strip()
-        dados.append({
-            "Código": codigo,
-            "Exame": nome,
-            "Valor": valor,
-            "Data/Hora Coleta": agora
-        })
-
-    return dados
-
-def fazer_login(driver, servsol, usuario, senha, status_cb):
-    """
-    Executa o login e navega até a Tabela de Preços (lista com botão 'Filtrar').
-    """
-    base_login = f"https://out-prd.diagnosticosdobrasil.com.br/Portal/Login?ServSol={servsol}"
-    status_cb.write("🌐 Acessando login…")
-    try:
-        driver.get(base_login)
-    except TimeoutException:
-        driver.refresh()
-
-    status_cb.write("⌛ Esperando campos de login…")
-    user_input = WebDriverWait(driver, 25).until(EC.presence_of_element_located((By.ID, "Input_UsernameVal")))
-    pass_input = driver.find_element(By.ID, "Input_PasswordVal")
-
-    user_input.clear(); user_input.send_keys(usuario)
-    pass_input.clear(); pass_input.send_keys(senha)
-    driver.find_element(By.CSS_SELECTOR, "button.btn-login").click()
-
-    status_cb.write("🔐 Autenticando…")
-    # Quando o campo some é porque entrou
-    WebDriverWait(driver, 25).until_not(EC.presence_of_element_located((By.ID, "Input_UsernameVal")))
-    status_cb.write("✅ Login ok!")
-
-    # Ir para o módulo Financeiro
-    status_cb.write("📂 Abrindo Financeiro…")
-    driver.get("https://out-prd.diagnosticosdobrasil.com.br/Portal/Financeiro?chave=")
-    time.sleep(2)
-
-    # Clicar no item "Tabela de Preços" do menu lateral (é o primeiro .fin-sidemenu-item)
-    menu = WebDriverWait(driver, 20).until(EC.element_to_be_clickable((By.CLASS_NAME, "fin-sidemenu-item")))
-    menu.click()
-    time.sleep(1.5)
-
-    # Clicar no botão "Filtrar"
-    status_cb.write("🔎 Aplicando filtro…")
-    filtro = WebDriverWait(driver, 20).until(
-        EC.element_to_be_clickable((By.XPATH, '//button[contains(@class,"btn-wb-hp-filtrar")]'))
-    )
-    filtro.click()
-    time.sleep(2.5)
-
-def rodar_coleta(servsol, usuario, senha, limite_paginas, progress, status_cb):
-    """
-    Orquestra tudo: login, leitura por páginas e saída DataFrame.
-    """
-    driver = None
-    try:
-        driver = build_driver()
-        fazer_login(driver, servsol, usuario, senha, status_cb)
-
-        todas = []
-        pagina = 1
-        progress.progress(0.0, text="Coletando página 1…")
-
-        while pagina <= limite_paginas:
-            dados = coletar_pagina(driver)
-            if dados:
-                todas.extend(dados)
-                status_cb.write(f"✅ Página {pagina} coletada ({len(dados)} registros).")
+            if lista:
+                dados_total.extend(lista)
+                status_cb.write(f"✅ Página {i} coletada com {len(lista)} registros.")
             else:
-                status_cb.write(f"⚠️ Página {pagina} sem dados.")
-            # próxima
-            if not try_click_next(driver):
-                status_cb.write("⛔ Não há próxima página. Encerrando.")
+                status_cb.write(f"⚠️ Página {i} sem dados.")
+
+            # Próxima página
+            try:
+                botao_next = await page.query_selector('//button[@aria-label="go to next page"]')
+                if botao_next:
+                    await botao_next.click()
+                    await page.wait_for_timeout(3000)
+                else:
+                    status_cb.write("🚫 Última página encontrada.")
+                    break
+            except:
+                status_cb.write("🚫 Erro ao mudar de página.")
                 break
 
-            pagina += 1
-            progress.progress(min(pagina/limite_paginas, 1.0), text=f"Coletando página {pagina}…")
+        await browser.close()
+    return dados_total
 
-        df = pd.DataFrame(todas, columns=["Código", "Exame", "Valor", "Data/Hora Coleta"])
-        return df
+# ============================================================
+# EXECUÇÃO PRINCIPAL
+# ============================================================
 
-    except (TimeoutException, NoSuchElementException, WebDriverException) as e:
-        status_cb.error(f"Erro durante a coleta: {e}")
-        return pd.DataFrame(columns=["Código", "Exame", "Valor", "Data/Hora Coleta"])
-    finally:
-        try:
-            if driver:
-                driver.quit()
-        except Exception:
-            pass
-
-# ---------------------------
-# Execução quando enviar o formulário
-# ---------------------------
-if submitted:
-    if not servsol or not usuario or not senha:
-        st.error("Por favor, preencha **ServSol**, **Usuário** e **Senha**.")
+if enviar:
+    if not (servsol and usuario and senha):
+        st.error("⚠️ Preencha todos os campos antes de continuar.")
         st.stop()
 
-    # Normaliza ServSol (aceita “c14296” ou “14296”)
-    if servsol.lower().startswith("c"):
-        servsol = servsol.lower()
-    else:
-        servsol = f"c{servsol}"
-
-    st.info(f"Convênio: **{servsol}**")
-    progress = st.progress(0.0, text="Iniciando…")
+    progress = st.progress(0.0, text="Iniciando...")
     status_cb = st.empty()
+    st.info("⏳ Iniciando coleta... Aguarde, pode levar alguns minutos.")
 
-    df = rodar_coleta(servsol, usuario, senha, int(total_paginas), progress, status_cb)
+    data = asyncio.run(coletar_dados(servsol, usuario, senha, paginas, status_cb, progress))
 
-    st.markdown("---")
-    if df.empty:
-        st.warning("Nenhum dado retornado. Verifique as credenciais/convênio ou tente novamente.")
+    if not data:
+        st.error("Nenhum dado encontrado ou erro de login.")
     else:
-        st.success(f"Coleta finalizada! {len(df)} linhas.")
+        df = pd.DataFrame(data, columns=["Código", "Exame", "Valor", "Data/Hora Coleta"])
+        st.success(f"✅ Coleta finalizada! {len(df)} registros.")
         st.dataframe(df, use_container_width=True, height=420)
 
-        # Gera Excel em memória
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # Gera Excel para download
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="DB_Pricing")
-        output.seek(0)
+        buffer.seek(0)
 
         st.download_button(
             label="📥 Baixar Excel (.xlsx)",
-            data=output,
+            data=buffer,
             file_name=f"DB_Pricing_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            use_container_width=True
         )
-
-    progress.progress(1.0, text="Concluído!")
